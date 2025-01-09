@@ -3,58 +3,38 @@ import numpy as np
 import cv2
 from sklearn.mixture import GaussianMixture
 from skimage.feature import hog
-from scipy.ndimage import median_filter
+from scipy.ndimage import gaussian_filter
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Input, Dense, Dropout
+from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
+import albumentations as A
 
 # Paths
-TRAIN_PATH = r"C:\cif_editor\corel10k_train"
-TEST_PATH = r"C:\cif_editor\corel10k_test"
-PROCESSED_DATA_PATH = r"C:\cif_editor\processed_images10"
+DATASET_PATH = r"C:\\cif_editor\\corel10k_10"
+PROCESSED_DATA_PATH = r"C:\\cif_editor\\processed_images10"
 
 # Load images and labels
-def load_images_from_folder(folder_path):
-    class_data = {}
+def load_images_and_labels(folder_path):
+    X, y = [], []
     class_names = sorted(os.listdir(folder_path))
+    label_mapping = {class_name: idx for idx, class_name in enumerate(class_names)}
 
     for class_name in class_names:
         class_path = os.path.join(folder_path, class_name)
         if os.path.isdir(class_path):
-            images = []
             for file in os.listdir(class_path):
                 if file.lower().endswith('.jpg'):
                     file_path = os.path.join(class_path, file)
                     image = cv2.imread(file_path)
                     if image is not None:
-                        images.append(image)
-            class_data[class_name] = images
+                        X.append(cv2.resize(image, (125, 185)))
+                        y.append(label_mapping[class_name])
 
-    return class_data
-
-def prepare_manual_dataset():
-    # Load training and testing data
-    train_data = load_images_from_folder(TRAIN_PATH)
-    test_data = load_images_from_folder(TEST_PATH)
-
-    # Combine into features and labels
-    def process_data(class_data):
-        X, y = [], []
-        label_mapping = {class_name: idx for idx, class_name in enumerate(class_data.keys())}
-        for class_name, images in class_data.items():
-            labels = [label_mapping[class_name]] * len(images)
-            X.extend([cv2.resize(img, (125, 185)) for img in images])
-            y.extend(labels)
-        return np.array(X), np.array(y)
-
-    X_train, y_train = process_data(train_data)
-    X_test, y_test = process_data(test_data)
-
-    return X_train, X_test, y_train, y_test
+    return np.array(X), np.array(y), label_mapping
 
 # Preprocess images
 def preprocess_image(image):
@@ -66,7 +46,9 @@ def segment_image_gmm(image):
     gmm = GaussianMixture(n_components=3, random_state=42)
     gmm.fit(pixels)
     segmented = gmm.predict(pixels).reshape(image.shape[:2])
-    smoothed = median_filter(segmented, size=3)
+
+    # Apply Gaussian smoothing to the segmented image
+    smoothed = gaussian_filter(segmented.astype(float), sigma=1)
     return smoothed
 
 # Extract HOG features
@@ -90,6 +72,8 @@ def extract_mser_features(image):
         if len(image.shape) == 3:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         mser = cv2.MSER_create()
+        mser.setDelta(3)
+        mser.setMinArea(30)
         regions, _ = mser.detectRegions(image)
         return np.array([len(regions)], dtype=np.float32)
     except Exception as e:
@@ -102,7 +86,10 @@ def extract_kaze_features(image):
         if len(image.shape) == 3:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        kaze = cv2.KAZE_create()
+        kaze = cv2.KAZE_create(
+            extended=True,
+            threshold=0.005
+        )
         keypoints, descriptors = kaze.detectAndCompute(image, None)
         if descriptors is not None:
             return np.mean(descriptors, axis=0)
@@ -112,69 +99,52 @@ def extract_kaze_features(image):
         print(f"Error extracting KAZE features: {e}")
         return None
 
-# Save processed images
-def save_processed_image(image, idx, label):
-    class_name = sorted(os.listdir(TRAIN_PATH))[label]
-    class_path = os.path.join(PROCESSED_DATA_PATH, class_name)
-    os.makedirs(class_path, exist_ok=True)
-    file_path = os.path.join(class_path, f"processed_{idx}.png")
-    cv2.imwrite(file_path, image)
+# Data augmentation
+def augment_image(image):
+    augmentations = A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.RandomBrightnessContrast(p=0.5),
+        A.Rotate(limit=15, p=0.5),
+        A.GaussianBlur(blur_limit=(3, 5), p=0.5),
+        A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+        A.RandomScale(scale_limit=0.1, p=0.5),
+    ])
+    augmented = augmentations(image=image)
+    return augmented['image']
 
-# Prepare dataset with combined features
-def prepare_dataset():
-    X_train, X_test, y_train, y_test = prepare_manual_dataset()
-    features_train, features_test = [], []
-    labels_train, labels_test = [], []
+# Augment dataset
+def augment_dataset(X, y, augment_times=3):
+    augmented_images = []
+    augmented_labels = []
 
-    # Gather data by class
-    for idx, (image, label) in enumerate(zip(X_train, y_train)):
-        processed_image = preprocess_image(image)
-        segmented_image = segment_image_gmm(processed_image)
+    for image, label in zip(X, y):
+        # Add original image
+        augmented_images.append(cv2.resize(image, (125, 185)))
+        augmented_labels.append(label)
 
-        smoothed_image = cv2.normalize(segmented_image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        smoothed_image = cv2.resize(smoothed_image, (125, 185))
+        # Augmentation
+        for _ in range(augment_times):
+            augmented_image = augment_image(image)
+            augmented_image = cv2.resize(augmented_image, (125, 185))
+            augmented_images.append(augmented_image)
+            augmented_labels.append(label)
 
-        save_processed_image(smoothed_image, idx, label)
+    return np.array(augmented_images), np.array(augmented_labels)
 
-        hog_features = extract_hog_features(smoothed_image)
-        mser_features = extract_mser_features(smoothed_image)
-        kaze_features = extract_kaze_features(smoothed_image)
+# Prepare dataset with augmentation
+def prepare_dataset_with_augmentation(augment_times=2):
+    X, y, label_mapping = load_images_and_labels(DATASET_PATH)
 
-        if hog_features is None or mser_features is None or kaze_features is None:
-            continue
+    # Split into training and testing data (80/20)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-        combined_features = np.hstack((hog_features, mser_features, kaze_features))
-        features_train.append(combined_features)
-        labels_train.append(label)
+    # Augment training data
+    X_train, y_train = augment_dataset(X_train, y_train, augment_times)
 
-    for idx, (image, label) in enumerate(zip(X_test, y_test)):
-        processed_image = preprocess_image(image)
-        segmented_image = segment_image_gmm(processed_image)
-
-        smoothed_image = cv2.normalize(segmented_image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        smoothed_image = cv2.resize(smoothed_image, (125, 185))
-
-        hog_features = extract_hog_features(smoothed_image)
-        mser_features = extract_mser_features(smoothed_image)
-        kaze_features = extract_kaze_features(smoothed_image)
-
-        if hog_features is None or mser_features is None or kaze_features is None:
-            continue
-
-        combined_features = np.hstack((hog_features, mser_features, kaze_features))
-        features_test.append(combined_features)
-        labels_test.append(label)
-
-    # Convert lists to arrays
-    X_train = np.array(features_train, dtype=np.float32)
-    y_train = np.array(labels_train, dtype=np.int32)
-    X_test = np.array(features_test, dtype=np.float32)
-    y_test = np.array(labels_test, dtype=np.int32)
-
-    # Standardize the features
+    # Standardize features
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
+    X_train = scaler.fit_transform(X_train.reshape(X_train.shape[0], -1))
+    X_test = scaler.transform(X_test.reshape(X_test.shape[0], -1))
 
     return X_train, X_test, y_train, y_test
 
@@ -185,13 +155,14 @@ def train_mlp_model(X_train, y_train, X_test, y_test):
     model = Sequential([
         Input(shape=(X_train.shape[1],)),
         Dense(1024, activation='relu'),
-        Dropout(0.2),
+        BatchNormalization(),
+        Dropout(0.3),
         Dense(512, activation='relu'),
-        Dropout(0.2),
-        Dense(256, activation='relu'),
-        Dropout(0.2),
+        BatchNormalization(),
+        Dropout(0.3),
         Dense(128, activation='relu'),
-        Dropout(0.2),
+        BatchNormalization(),
+        Dropout(0.3),
         Dense(num_classes, activation='softmax')
     ])
 
@@ -215,7 +186,7 @@ def train_mlp_model(X_train, y_train, X_test, y_test):
     loss, accuracy = model.evaluate(X_test, y_test)
     print(f'Model Accuracy: {accuracy * 100:.2f}%')
 
-    class_names = sorted(os.listdir(TRAIN_PATH))
+    class_names = sorted(os.listdir(DATASET_PATH))
     print("Classification Report:\n", classification_report(y_test, y_pred, target_names=class_names, zero_division=0))
     print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
 
@@ -223,13 +194,14 @@ def train_mlp_model(X_train, y_train, X_test, y_test):
 
 # Main function
 def main():
-    if not os.path.exists(TRAIN_PATH) or not os.path.exists(TEST_PATH):
-        print(f"Paths {TRAIN_PATH} or {TEST_PATH} do not exist!")
+    if not os.path.exists(DATASET_PATH):
+        print(f"Path {DATASET_PATH} does not exist!")
         return
 
     os.makedirs(PROCESSED_DATA_PATH, exist_ok=True)
 
-    X_train, X_test, y_train, y_test = prepare_dataset()
+    # Use dataset with augmentation
+    X_train, X_test, y_train, y_test = prepare_dataset_with_augmentation(augment_times=2)
     if X_train.size == 0 or y_train.size == 0:
         print("Dataset preparation failed. Check your data directory.")
         return
