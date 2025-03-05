@@ -14,23 +14,7 @@ In the repo, you can find input data in the folder *"corel10k_10"*. It includes 
 
 Results obtained using my implementation of the model:
 
-Model Accuracy: 74.50%
-Classification Report:
-               precision    recall  f1-score   support
+![image](https://github.com/user-attachments/assets/506a8ae8-8cf6-41b5-a480-36d048a51777)
 
-        bike       0.78      0.35      0.48        20
-        bird       0.45      0.75      0.57        20
-        boat       0.95      0.95      0.95        20
-    building       0.70      0.95      0.81        20
-         car       0.82      0.90      0.86        20
-        deer       0.71      0.50      0.59        20
-         dog       0.59      0.65      0.62        20
-    elephant       0.92      0.60      0.73        20
-      flower       0.87      1.00      0.93        20
-       horse       0.94      0.80      0.86        20
-
-    accuracy                           0.74       200
-   macro avg       0.77      0.74      0.74       200
-weighted avg       0.77      0.74      0.74       200
 
 *The project was completed as part of the final work for the course Machine Learning (NSU, Department of Mechanics and Mathematics, Prof. M.S. Tarkov)*
